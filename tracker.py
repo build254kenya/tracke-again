@@ -1,103 +1,109 @@
 import time
 import json
-import subprocess as sp
+import subprocess
+import platform
 from pynput import keyboard, mouse
+from plyer import notification
 
+# ================= CONFIG =================
+CHECK_INTERVAL = 5          # seconds
+IDLE_LIMIT = 300            # 5 minutes
 STATE_FILE = "state.json"
 LOG_FILE = "system.log"
-
-CHECK_INTERVAL = 60          # seconds
-IDLE_LIMIT = 300             # 5 minutes
-LOW_FOCUS_LIMIT = 50         # %
-
-# Apps that definitely steal attention
-DISTRACT_APPS = [
-    "Chrome", "YouTube", "Facebook", "X", "TikTok"
-]
+# =========================================
 
 last_input_time = time.time()
 key_count = 0
 
 focused_time = 0
-distracted_time = 0
 idle_time = 0
+total_time = 0
 
+last_window = None
+last_window_switch = time.time()
 
-def notify(title, message):
-    try:
-        sp.run(["notify-send", title, message])
-    except:
-        pass
-
-
+# ---------- INPUT TRACKING ----------
 def on_input(*args):
     global last_input_time
     last_input_time = time.time()
-
 
 def on_key(key):
     global key_count, last_input_time
     key_count += 1
     last_input_time = time.time()
 
+mouse.Listener(
+    on_move=on_input,
+    on_click=on_input,
+    on_scroll=on_input
+).start()
 
-mouse.Listener(on_move=on_input, on_click=on_input, on_scroll=on_input).start()
 keyboard.Listener(on_press=on_key).start()
 
-
+# ---------- WINDOW NAME ----------
 def get_active_window():
     try:
-        return sp.check_output(
-            ["xdotool", "getactivewindow", "getwindowname"],
-            stderr=sp.DEVNULL
-        ).decode().strip()
+        if platform.system() == "Windows":
+            import win32gui
+            return win32gui.GetWindowText(win32gui.GetForegroundWindow())
+        else:
+            return subprocess.check_output(
+                ["xdotool", "getactivewindow", "getwindowname"],
+                stderr=subprocess.DEVNULL
+            ).decode().strip()
     except:
         return "UNKNOWN"
 
+# ---------- NOTIFICATION ----------
+def notify(title, message):
+    try:
+        notification.notify(
+            title=title,
+            message=message,
+            timeout=5
+        )
+    except:
+        pass
 
-def focus_percent():
-    total = focused_time + distracted_time + idle_time
-    if total == 0:
-        return 100
-    return int((focused_time / total) * 100)
-
-
+# ---------- MAIN LOOP ----------
 while True:
     now = time.time()
     idle = now - last_input_time
     window = get_active_window()
 
-    # SMART focus accounting
-    if idle > CHECK_INTERVAL:
-        idle_time += CHECK_INTERVAL
+    total_time += CHECK_INTERVAL
+
+    if idle < CHECK_INTERVAL:
+        focused_time += CHECK_INTERVAL
     else:
-        if any(app in window for app in DISTRACT_APPS):
-            distracted_time += CHECK_INTERVAL
-        else:
-            focused_time += CHECK_INTERVAL
+        idle_time += CHECK_INTERVAL
 
-    focus = focus_percent()
+    focus_percent = (
+        int((focused_time / total_time) * 100)
+        if total_time > 0 else 0
+    )
 
-    # Notifications
-    if idle > IDLE_LIMIT:
+    # Notify on long idle
+    if idle >= IDLE_LIMIT and idle < IDLE_LIMIT + CHECK_INTERVAL:
         notify(
-            "😈 Wake up.",
-            "You said you were building. Start typing."
+            "😈 No Mercy",
+            "Idle detected. Discipline slipping."
         )
 
-    if focus < LOW_FOCUS_LIMIT:
+    # Notify on Chrome abuse
+    if "Chrome" in window and idle < CHECK_INTERVAL:
         notify(
-            "⚠ Focus slipping",
-            f"Focus at {focus}%. Discipline yourself."
+            "😈 Focus Judge",
+            "Too much Chrome. Build something."
         )
 
-    # State snapshot
+    # Save state
     state = {
-        "time": int(now),
+        "time": now,
         "idle_seconds": int(idle),
-        "keys_last_min": key_count,
+        "keys_last_interval": key_count,
         "window": window,
-        "focus_percent": focus
+        "focus_percent": focus_percent
     }
 
     with open(STATE_FILE, "w") as f:
@@ -107,7 +113,7 @@ while True:
         log.write(
             f"{now}, idle={int(idle)}s, "
             f"keys={key_count}, "
-            f"focus={focus}%, "
+            f"focus={focus_percent}%, "
             f"window={window}\n"
         )
 
